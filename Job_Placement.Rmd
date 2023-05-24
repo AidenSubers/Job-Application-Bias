@@ -1,6 +1,6 @@
 ---
 title: "Job_Placement"
-author: "Brian Ellis"
+author: "Aiden Subers, Brian Ellis, Samuel Geiser"
 date: "2023-02-24"
 output: html_document
 ---
