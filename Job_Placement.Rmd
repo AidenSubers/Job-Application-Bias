@@ -1,0 +1,460 @@
+---
+title: "Job_Placement"
+author: "Brian Ellis"
+date: "2023-02-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F)
+```
+
+```{r}
+remove(list = ls())
+library(tidyverse)
+library(caret)
+library(pROC)
+library(glmnet)
+```
+
+```{r}
+# Import dataset
+Jobs <- read.csv("~/Downloads/Job_Placement_Data.csv")
+head(Jobs)
+```
+
+## Introduction
+
+The first question we must answer is which metrics we will use to judge fairness. Demographic parity, while nice in concept, doesn't seem like the best metric to judge this dataset because it doesn't take into account the quality of the candidate. We could satisfy demographic parity easily by selecting an equal proportion of males and females from the dataset with no regard for their merits as potential employees - this doesn't seem like an ideal approach. A better approach would be to hire an equal proportion of males and females whom are qualified for the job. This leads us to equalized odds, which will be the focus of our project and the metric to which we will develop a new model to satisfy.
+
+### Why equalized odds? 
+
+We are choosing to build a model that satisfies equalized odds to benefit the applicants in the dataset. Equalized odds will bring about similar true and false positive rates amongst males and females being hired. This is good news for the applicants as they can rest assured they are not being discriminated against based on any external factors.
+
+### Why not predictive value parity?
+
+Males and females in our dataset are not hired at equal rates and do not have equal measurements and statistics, as we will see in our exploratory data analysis. Predicitve value parity would benefit the employers hiring candidates but not necessarily the candidates. 
+
+## EDA
+
+```{r}
+str(Jobs)
+```
+
+```{r}
+Jobs %>% 
+  group_by(gender) %>% 
+  summarize(count = n())
+```
+
+We see a greater amount of males are present in the dataset. This will be important for us when considering base rates for job placement.
+
+```{r}
+Jobs %>% 
+  group_by(gender) %>% 
+  summarize(Count = n(),
+            Placed = sum(status == "Placed"),
+            Not_Placed = sum(status == "Not Placed"))
+```
+
+Here we see the disparity between rates of placement of males and females in the dataset. We can see this more clearly by calculating the proportion of each gender that was placed.
+
+```{r}
+# Proportion of males and females placed
+Jobs %>% 
+  count(gender, status) %>% 
+  group_by(gender) %>% 
+  summarize(status = status, prop = n / sum(n))
+```
+
+72% of male applicants were placed, while only 63% of female applicants ended up being placed. We can do a quick demographic parity check: $$\frac {FemalesPlaced}{Males Placed} = \frac{0.6315789}{0.7194245} = 0.87789$$
+
+This leads to a demographic parity value of roughly 0.878 which is not bad but not great either. Our goal is not to satisfy demographic parity anyways but it's good to see where this dataset lies with respect to it and this also shows how females in the dataset are in the minority class by a noticeable difference.
+
+```{r}
+Jobs %>% 
+  group_by(gender, undergrad_degree) %>% 
+  summarize(N = n())
+```
+
+
+
+```{r}
+# Calculate proportion of each gender in each degree type
+JobProp <-
+  Jobs %>% 
+    count(gender, undergrad_degree) %>% 
+    group_by(gender) %>% 
+    mutate(proportion = n / sum(n))
+JobProp
+```
+
+
+```{r}
+# Visualize proportions to see if there's disparity
+JobProp %>% 
+  ggplot(aes(x = undergrad_degree, y = proportion, group = gender, fill = gender)) +
+  geom_bar(position='dodge', stat='identity') +
+  labs(x = "Undergraduate Degree",
+       y = "Proportion (%)",
+       title = "Unequal Proportionality Between Degree and Gender?")
+
+```
+
+Here we see gender disparity between sexes in the type of undergraduate degree they pursued. A greater proportion of males graduated with 'Sci&Tech' degrees while a greater proportion of females graduated with 'Comm&Mgmt& degrees. We can test to see if these results are statistically significant.
+
+```{r}
+# Split proportions by gender to compare
+DegreeFem <-
+  Jobs %>% 
+  filter(gender == "F") %>% 
+  group_by(gender, undergrad_degree) %>% 
+  summarise(count = n())
+DegreeMale <-
+  Jobs %>% 
+  filter(gender == "M") %>% 
+  group_by(gender, undergrad_degree) %>% 
+  summarise(count = n())
+chisq.test(DegreeFem$count, DegreeMale$count)
+```
+
+We don't see a statistically significant result when comparing males and females to undergraduate degree type.
+
+
+```{r}
+# Visualize distributions of test scores across gender
+Jobs %>% 
+  ggplot(aes(x = ssc_percentage, group = gender, fill = gender)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Senior secondary exams percentage (10th Grade)",
+       x = "Percent",
+       y = "Density")
+```
+
+```{r}
+Jobs %>% 
+  ggplot(aes(x = hsc_percentage, group = gender, fill = gender)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Higher secondary exams percentage (12th Grade)",
+       x = "Percent",
+       y = "Density")
+```
+
+```{r}
+Jobs %>% 
+  ggplot(aes(x = emp_test_percentage, group = gender, fill = gender, alpha = 0.3)) +
+  geom_density() +
+  labs(title = "EMP (Aptitude Test) Percentage",
+       x = "Percent",
+       y = "Density")
+```
+
+```{r}
+Jobs %>% 
+  ggplot(aes(x = mba_percent, group = gender, fill = gender)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "MBA Test Percentage",
+       x = "Percent",
+       y = "Density")
+```
+
+```{r}
+Jobs %>% 
+  ggplot(aes(x = degree_percentage, group = gender, fill = gender)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Degree Percentage",
+       x = "Percent",
+       y = "Density")
+```
+
+```{r}
+Jobs %>% 
+  ggplot(aes(x = work_experience, fill = gender)) +
+  geom_histogram(stat = "count") +
+  labs(title = "Work Experience by Gender",
+       x = "Work Experience",
+       y = "Count")
+```
+
+```{r}
+# Proportion of males and females with previous work experience
+Jobs %>% 
+  count(gender, work_experience) %>% 
+  group_by(gender) %>% 
+  summarize(work_experience = work_experience, 
+            prop = n / sum(n))
+```
+
+
+We can see a greater proportion of females don't have previous work experience. This could factor into he decision maker's process when selecting candidates to place into a job.
+
+Now that we know roughly what our data looks like when comparing amongst genders, we can begin building some initial models to help us determine which features are most important and which ones to include in our final model.
+
+
+## Model Exploration
+
+
+```{r}
+# Create indicator variable for response
+Jobs <- Jobs %>% 
+  mutate(Placed = ifelse(status == "Placed", 1, 0))
+# Inital log reg
+genderlm <- lm(Placed ~ gender, data = Jobs)
+summary(genderlm)
+```
+
+This simple linear regression model has a positive coefficient associated with being male, when gender is the only variable being considered for job placement.
+
+### Feature Selection
+
+```{r}
+# Indicator variables
+Jobs <- Jobs %>% 
+  mutate(Placed = ifelse(status == "Placed", 1, 0))
+
+#Build Intercept Only Model. NOTE: ~ 1 tells R that you only want an intercept
+int_only_model <- glm(Placed ~ 1, family = binomial, data = Jobs)
+
+#Build model with all potential regressors. 
+full_model <- glm(Placed ~ . -status, family = binomial, data = Jobs)
+
+#Perform backward elimination
+stats::step(object = full_model, 
+            scope = list(lower = int_only_model, upper = full_model),
+            data = Train,
+            direction = "backward")
+```
+
+From this backward feature selection, we can remove a few variables from our model. It also shows a positive value for 'genderM' which can indicate some gender bias in favor of males in the dataset.
+
+We can also build a LASSO model and see what it deems are the most important features
+
+```{r}
+#Put data frame in form needed for glmnet
+Xmat <- model.matrix(Placed ~ . -status, data = Jobs)[ ,-1]
+y <- Jobs$Placed
+# Build LASSO model
+set.seed(42)
+cv.out <- cv.glmnet(x = Xmat, y = y, 
+                    alpha = 1, standardize = TRUE,
+                    nfolds = 10)
+set.seed(NULL)
+plot(cv.out)
+```
+
+Let's select the largest lambda value within 1 standard deviation of the minimum. This will provide us with a lambda value that will apply more regularization and thus narrow down our features to only the most important.
+
+```{r}
+bestlam1 <- cv.out$lambda.1se
+#Predict the responses for the test set (use for MSE/RMSE calc)
+lasso.pred1 <- predict(cv.out , s = bestlam1,
+                      newx = Xmat)
+#Find the coefficients
+lasso.coef1 <- predict(cv.out , s = bestlam1,
+                      type = "coefficients")
+bestlam1
+lasso.coef1
+```
+
+This lambda value applies a lot of regularization which allows us to see the most important variables when it comes to a candidate being placed.
+
+We'll now build a model containing only the selected features of ssc_percentage, mba_percent, and degree_percentage.
+
+```{r}
+log_reg <- glm(Placed ~ gender + ssc_percentage + mba_percent + degree_percentage, family = "binomial", data = Jobs)
+summary(log_reg)
+```
+
+The gender coefficient has a positive value associated with being male and is statistically signficant with a p-value of less than 0.05. We can deduce that if a candidate is male, i.e., has a value of 1 for their gender variable, then their odds of being hired are $$e^{1.30837} \approx 3.7$$ times the odds of being hired if they were female.
+
+Let's visualize these features with respect to gender.
+
+```{r}
+# Reload dataset
+Jobs <- read.csv("~/Downloads/Job_Placement_Data.csv")
+# Relationship between gender and ssc_percentage
+Jobs %>% 
+  ggplot(aes(x = gender, y = ssc_percentage)) +
+  geom_point(aes(color = status), position = "jitter") +
+  geom_boxplot(aes(alpha = 0.1)) +
+  labs(x = "Gender",
+       y = "Senior Secondary Exam %")
+```
+
+Even though Females scored higher overall ssc_percentage, males were still hired at a greater rate. This shows gender is a greater predictor for placement as compared with ssc_percentage, a variable we originally thought of as the most important.
+
+```{r}
+# Relationship between gender and ssc_percentage
+Jobs %>% 
+  ggplot(aes(x = gender, y = mba_percent)) +
+  geom_point(aes(color = status), position = "jitter") +
+  geom_boxplot(aes(alpha = 0.1)) +
+  labs(x = "Gender",
+       y = "MBA Exam %")
+```
+
+
+```{r}
+Jobs %>% 
+  ggplot(aes(x = gender, y = degree_percentage)) +
+  geom_point(aes(color = status), position = "jitter") +
+  geom_boxplot(aes(alpha = 0.1)) +
+  labs(x = "Gender",
+       y = "Undergraduate Degree %")
+```
+
+For all these variables that are important for the placement, females have a higher overall score. So why do males have a higher job placement probability than females?
+
+Let's use our logistic regression model to predict the probability that 2 new candidates will get hired. These two candidates will have the same attributes across variables, (same exam scores and degree percentage), with the only difference being the gender of the applicant. For the other attributes, we'll use the median value of male applicants.
+
+```{r}
+Female_prob <- predict(log_reg, newdata = data.frame(gender = 'F', ssc_percentage = 65, mba_percent = 61, degree_percentage = 65), type = "response")
+Male_prob <- predict(log_reg, newdata = data.frame(gender = 'M', ssc_percentage = 65, mba_percent = 61, degree_percentage = 65), type = "response")
+
+cat("Female Probability:", Female_prob)
+cat("\nMale Probability:  ", Male_prob)
+```
+
+We see that if we just change gender variable, there is about a 27% difference in probability as to whether the candidate is predicted to be hired when controlling for the variables 'ssc_percentage', 'mba_percent', and 'degree_percentage'. If a female candidate were to have the same attributes as a male, they have a 27% increase in probability of being hired.
+
+```{r}
+Jobs %>% 
+  ggplot(aes(x = ssc_percentage, y = hsc_percentage, color = gender, shape = gender)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~ status)
+```
+
+We can see that there are a greater number of poor performing male candidates bringing the average exam percentages down for the male group. If we look at the distribution between placed members of each gender group, we get a more balanced distribution between gender and exam scores.
+
+
+## Equalized Odds
+
+We will create a new logistic regression model with the 4 variables we find most interesting and impactful upon the 'Placed' variable: 'ssc_percentage', 'mba_percent', 'degree_percentage', and 'gender'. First, we will scale these numeric variables, and perform 10-fold cross-validation because the dataset is so small that a random split can make a big difference.
+
+```{r}
+# Create indicator variables
+Jobs <- Jobs %>% 
+  mutate(Placed = ifelse(status == "Placed", 1, 0))
+xvars <- c("ssc_percentage", "mba_percent", "degree_percentage")
+# Scale
+Jobs[, xvars] <- scale(Jobs[ , xvars], center = TRUE, scale = TRUE)
+```
+
+```{r}
+plot(x = Jobs$ssc_percentage, y = Jobs$Placed)
+
+glm.fit = glm(Placed ~ ssc_percentage + mba_percent + degree_percentage + gender, family = binomial, data = Jobs)
+lines(Jobs$ssc_percentage, glm.fit$fitted.values)
+```
+
+```{r}
+# set boundaries to square
+par(pty = "s")
+# Plot ROC curve
+roc(Jobs$Placed, glm.fit$fitted.values, plot = T, legacy.axes = T, percent = T, 
+    xlab = "False Positive Percentage", ylab = "True Positive Percentage",
+    col = "dodgerblue", lwd = 4, print.auc = T)
+```
+```{r}
+# Obtain thresholds from ROC curve
+roc.info <- roc(Jobs$Placed, glm.fit$fitted.values, legacy.axes = T)
+
+roc.df <- data.frame(
+  tpp = roc.info$sensitivities * 100,
+  fpp = (1 - roc.info$sensitivities) * 100,
+  thresholds = roc.info$thresholds
+)
+head(roc.df)
+tail(roc.df)
+```
+
+```{r}
+# Append fitted values into data
+glm.fit$data <- glm.fit$data %>% 
+  mutate(values = glm.fit$fitted.values)
+
+# Create male and female datasets
+Males <- glm.fit$data %>% 
+  filter(gender == "M")
+
+Females <- glm.fit$data %>% 
+  filter(gender == "F")
+
+# Overlap ROC curves for males and females
+par(pty = "s")
+roc(Males$Placed, Males$values, plot = T, legacy.axes = T, percent = T, 
+    xlab = "False Positive Percentage", ylab = "True Positive Percentage",
+    col = "dodgerblue", lwd = 4, print.auc = T)
+plot.roc(Females$Placed, Females$values, add = T, percent = T,
+    col = "limegreen", lwd = 4, print.auc = T, print.auc.y = 40)
+legend("bottomright", legend = c("Males", "Females"), col = c("dodgerblue", "limegreen"), lwd = 4)
+
+# Set draw graph space back to default
+par(pty = "m")
+```
+
+We see that Males have a greater AUC score than Females. We can isolate the areas where the ROC curves intersect to determine which thresholds for males and females would be ideal.
+
+```{r}
+# Obtain thresholds from ROC curve for Males and Females
+roc_males.info <- roc(Males$Placed, Males$values, legacy.axes = T)
+roc_males.df <- data.frame(
+  tpp = roc_males.info$sensitivities * 100,
+  fpp = (1 - roc_males.info$sensitivities) * 100,
+  thresholds = roc_males.info$thresholds
+)
+
+roc_females.info <- roc(Females$Placed, Females$values, legacy.axes = T)
+roc_females.df <- data.frame(
+  tpp = roc_females.info$sensitivities * 100,
+  fpp = (1 - roc_females.info$sensitivities) * 100,
+  thresholds = roc_females.info$thresholds
+)
+
+# Isolate thresholds where TPP and FPP are optimal
+roc_males.df[roc_males.df$tpp > 85 & roc_males.df$tpp < 95, ]
+roc_females.df[roc_females.df$tpp > 85 & roc_females.df$tpp < 95, ]
+```
+
+We should be looking for threshold values for males and females where the true and false positive rates are similar. This occurs when Male and Female tpp is 89 and also when tpp is 94. The threshold for males and females for both of these tpp rates are 0.65 and 0.43, and 0.45 and 0.36 respectively.
+
+This difference between threshold values indicates a discrepancy between the success rate of males and females in the dataset when considering 'Placed' as a successful outcome. When moving forward with our unbiased model, we should use either of these set of threshold values for males and females to achieve equalized odds.
+
+```{r}
+#Establish male threshold
+male_thresh <- 0.65
+
+#Establish female threshold
+female_thresh <- 0.43
+
+#Find predicted probabilities for all in dataset
+male_prob <- predict(glm.fit, newdata = Males, type = "response")
+female_prob <- predict(glm.fit, newdata = Females, type = "response")
+
+#Predict placed
+male_pred <- ifelse(male_prob > male_thresh, 1, 0)
+female_pred <- ifelse(female_prob > female_thresh, 1, 0)
+
+# Create confusion matrices
+# Male matrix
+male_matrix <- confusionMatrix(data = as.factor(male_pred),
+                reference = as.factor(Males$Placed),
+                positive = "1")
+
+# Female matrix
+female_matrix <- confusionMatrix(data = as.factor(female_pred),
+                reference = as.factor(Females$Placed),
+                positive = "1")
+
+cat("Male confusion matrix:\n")
+print(male_matrix)
+cat("Female confusion matrix:\n")
+print(female_matrix)
+```
+
+Based on the confusion matrices produced for males and females respectively, we see that the model gives equal sensitivity rates, 89%, between genders with the adjusted threshold values. This new model satisfies equalized odds while generating a reasonable level of accuracy, 86.33% for males and 82.89% for females, which should satisfy employers.
+
+One important thing to note with our model is that we opted to exclude previous work experience as a factor in the model's decision making. Going back to the data, we found that males had a higher rate than females in regards to work experience, 37.4% to 28.9% respectively, this feature can reinforce the gender disparity between placement rates. And because the dataset is comprised of individuals applying for entry-level positions, previous work experience shouldn't have a large impact.
+
+
